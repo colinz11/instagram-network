@@ -108,7 +108,7 @@ class InstagramScraper:
 
             # Click login
             login_button.click()
-            time.sleep(5)
+            time.sleep(7)
 
 
             print("Login successful")
@@ -169,38 +169,65 @@ class InstagramScraper:
         """Scroll through the followers/following dialog and extract all usernames"""
         try:
             usernames = set()
-            last_height = 0
-            scroll_attempts = 0
-            max_scroll_attempts = 3  # Stop scrolling if no new content after 3 attempts
+            print("Scrolling through list...")
+            # Try both possible selectors for the scrollable container
+            scrollable = None
+            selectors = [
+                ".xyi19xy.x1ccrb07.xtf3nb5.x1pc53ja.x1lliihq.x1iyjqo2.xs83m0k.xz65tgg.x1rife3k.x1n2onr6",
+                ".x9f619.xjbqb8w.x78zum5.x168nmei.x13lgxp2.x5pf9jr.xo71vjh.x1n2onr6.x6ikm8r.x1rife3k.x1iyjqo2.x2lwn1j.xeuugli.xdt5ytf.xqjyukv.x1qjc9v5.x1oa3qoh.x1nhvcw1"
+            ]
             
-            print("Fast scrolling to bottom...")
-            scrollable = dialog.find_element(
-                By.CSS_SELECTOR,
-                "div._aano"  # Instagram's scrollable container class
-            )
+            for selector in selectors:
+                try:
+                    scrollable = dialog.find_element(By.CSS_SELECTOR, selector)
+                    if scrollable:
+                        print(f"Found scrollable container with selector: {selector}")
+                        break
+                except:
+                    continue
+            
+            if not scrollable:
+                print("Could not find scrollable container")
+                return []
 
-            while scroll_attempts < max_scroll_attempts:
+            retries = 0
+            last_height = 0
+            scroll_increment = 300
+            max_scroll_attempts = 3 
+            
+            while retries < max_scroll_attempts:
                 # Check for rate limit popup before each scroll
                 if self.handle_rate_limit_popup():
                     break
                 
+                # Get current scroll position
+                current_height = self.driver.execute_script("return arguments[0].scrollTop", scrollable)
+                scroll_height = self.driver.execute_script("return arguments[0].scrollHeight", scrollable)
+                
+                # Extract usernames from current view
                 usernames.update(self.extract_usernames(dialog))
-
-               # Get current scroll heightAdd commentMore actions
-                current_height = self.driver.execute_script("return arguments[0].scrollHeight", scrollable)
-
-                if current_height == last_height:
+                
+                # If we haven't moved or we're at the bottom
+                if current_height == last_height or current_height + 1000 >= scroll_height:
                     retries += 1
                     if retries >= max_scroll_attempts:
-                        print("Reached the bottom")
+                        print("Reached the bottom or no more content")
                         break
                 else:
                     retries = 0
-
-                # Scroll directly to the bottom
-                self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable)
-
-                # Store last height
+                
+                # Scroll down naturally with a random increment
+                scroll_amount = random.randint(scroll_increment - 50, scroll_increment + 50)
+                new_position = current_height + scroll_amount
+                self.driver.execute_script(
+                    "arguments[0].scrollTop = arguments[1]", 
+                    scrollable, 
+                    new_position
+                )
+                
+                # Random delay between scrolls
+                self.random_delay(0.5, 1.5)
+                
                 last_height = current_height
                 
             return list(usernames)
@@ -390,7 +417,6 @@ class InstagramScraper:
                 current_retry += 1
                 if current_retry < max_retries:
                     print("Retrying after error...")
-                    self.random_delay(5, 10)  # Longer delay after error
                 
         print(f"Failed to get {connection_type} after {max_retries} attempts")
         return []
@@ -487,27 +513,13 @@ class InstagramScraper:
             
             # Process users in batches
             users_list = list(users_to_process)
-            for i in range(0, len(users_list), self.batch_size):
-                batch = users_list[i:i + self.batch_size]
-                print(f"\nProcessing batch {i//self.batch_size + 1}/{(len(users_list) + self.batch_size - 1)//self.batch_size}")
-                
-                for j, username in enumerate(batch, 1):
-                    try:
-                        print(f"\nProcessing user {j}/{len(batch)} in current batch: {username}")
-                        self.process_user(username)
-                        # Random delay between users
-                        if j < len(batch):
-                            self.random_delay()
-                    except Exception as e:
-                        print(f"Error processing user {username}: {str(e)}")
-                        # Try to recreate the driver if it crashed
-                        try:
-                            self.driver.quit()
-                        except:
-                            pass
-                        self.setup_driver()
-                        self.login()
-                        continue
+            for username in users_list:
+                try:
+                    print(f"\nProcessing user: {username}")
+                    self.process_user(username)
+                    self.random_delay()
+                except Exception as e:
+                    print(f"Error processing user {username}: {str(e)}")
             
             print("\nNetwork data collection completed successfully!")
             
