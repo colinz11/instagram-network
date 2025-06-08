@@ -32,11 +32,6 @@ class InstagramScraper:
         self.min_delay = 2  # Minimum delay between requests in seconds
         self.max_delay = 4  # Maximum delay between requests in seconds
         self.batch_size = 25  # Number of users to process before taking a longer break
-        self.batch_break_min = 300  # Minimum break time between batches in seconds (5 minutes)
-        self.batch_break_max = 600  # Maximum break time between batches in seconds (10 minutes)
-        
-        # Request tracking
-        self.request_timestamps = []
 
     def setup_driver(self):
         chrome_options = Options()
@@ -128,27 +123,47 @@ class InstagramScraper:
         max_d = max_delay if max_delay is not None else self.max_delay
         delay = random.uniform(min_d, max_d)
         time.sleep(delay)
-        
-    def check_rate_limit(self):
-        """Check if we're approaching rate limits and wait if necessary"""
-        now = datetime.now()
-        hour_ago = now - timedelta(hours=1)
-        
-        # Remove timestamps older than 1 hour
-        self.request_timestamps = [ts for ts in self.request_timestamps if ts > hour_ago]
-        
-        # If we're approaching the limit, wait until we have capacity
-        while len(self.request_timestamps) >= self.requests_per_hour:
-            sleep_time = (self.request_timestamps[0] + timedelta(hours=1) - now).total_seconds()
-            if sleep_time > 0:
-                print(f"Approaching rate limit. Waiting {sleep_time:.0f} seconds...")
-                time.sleep(sleep_time)
-            now = datetime.now()
-            hour_ago = now - timedelta(hours=1)
-            self.request_timestamps = [ts for ts in self.request_timestamps if ts > hour_ago]
-        
-        # Add current request timestamp
-        self.request_timestamps.append(now)
+    
+
+    def handle_rate_limit_popup(self) -> bool:
+        """Handle Instagram's rate limit popup if it appears.
+        Returns:
+            bool: True if handled successfully, False if we should abort
+        """
+        try:
+            # Check for rate limit popup using the exact class selector
+            popup = self.driver.find_elements(
+                By.CSS_SELECTOR, 
+                "h3.x1lliihq.x1plvlek.xryxfnj.x1n2onr6"
+            )
+            
+            if popup and any("Try Again Later" in p.text for p in popup):
+                print("Rate limit popup detected. Looking for OK button...")
+                
+                try:
+                    # Look specifically for the OK button
+                    ok_button = self.wait.until(
+                        EC.element_to_be_clickable((
+                            By.XPATH,
+                            "//button[text()='OK']"
+                        ))
+                    )
+                    print("Found OK button, clicking it...")
+                    ok_button.click()
+                    self.random_delay()
+                except Exception as e:
+                    print(f"Error clicking OK button: {str(e)}")
+                    try:
+                        webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+                        self.random_delay()
+                    except:
+                        print("Could not dismiss popup with Escape key")
+                    return True
+                return False
+            return False
+        except Exception as e:
+            print(f"Error checking for rate limit popup: {str(e)}")
+            return True
 
     def scroll_to_load_all(self, dialog) -> List[str]:
         """Scroll through the followers/following dialog and extract all usernames"""
@@ -158,31 +173,36 @@ class InstagramScraper:
             scroll_attempts = 0
             max_scroll_attempts = 3  # Stop scrolling if no new content after 3 attempts
             
+            print("Fast scrolling to bottom...")
+            scrollable = dialog.find_element(
+                By.CSS_SELECTOR,
+                "div._aano"  # Instagram's scrollable container class
+            )
+
             while scroll_attempts < max_scroll_attempts:
-                # Extract usernames from current view
-                elements = dialog.find_elements(By.CSS_SELECTOR, "a.x1i10hfl")
-                new_usernames = {elem.text for elem in elements if elem.text}
-                usernames.update(new_usernames)
+                # Check for rate limit popup before each scroll
+                if self.handle_rate_limit_popup():
+                    break
                 
-                # Scroll down
-                dialog.send_keys(Keys.END)
-                self.random_delay(1, 2)  # Shorter delay for scrolling
-                
-                # Check if we've reached the bottom
-                new_height = dialog.get_attribute("scrollHeight")
-                if new_height == last_height:
-                    scroll_attempts += 1
+                usernames.update(self.extract_usernames(dialog))
+
+               # Get current scroll heightAdd commentMore actions
+                current_height = self.driver.execute_script("return arguments[0].scrollHeight", scrollable)
+
+                if current_height == last_height:
+                    retries += 1
+                    if retries >= max_scroll_attempts:
+                        print("Reached the bottom")
+                        break
                 else:
-                    scroll_attempts = 0
-                last_height = new_height
+                    retries = 0
+
+                # Scroll directly to the bottom
+                self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable)
+
+                # Store last height
+                last_height = current_height
                 
-                # Add some randomness to the scrolling
-                if random.random() < 0.2:  # 20% chance to scroll up a bit
-                    dialog.send_keys(Keys.PAGE_UP)
-                    self.random_delay(0.5, 1)
-                    dialog.send_keys(Keys.PAGE_DOWN)
-                    self.random_delay(0.5, 1)
-            
             return list(usernames)
                 
         except Exception as e:
@@ -282,9 +302,7 @@ class InstagramScraper:
             )
             count_text = count_link.text.strip()
             
-            # Extract number from text (e.g., "1,234 followers" -> 1234)
-            count = int(''.join(filter(str.isdigit, count_text)))
-            return count
+            return self.convert_count_to_number(count_text)
 
         except Exception as e:
             print(f"Error getting {connection_type} count for {target_username}: {str(e)}")
@@ -311,42 +329,71 @@ class InstagramScraper:
 
     def get_user_connections(self, target_username: str, connection_type: str) -> List[str]:
         """Get either followers or following list for a user."""
-        try:
-            print(f"Getting {connection_type} for {target_username}...")
-            
-            self.check_rate_limit()
-            if not self.driver.current_url.endswith(f'/{target_username}/'):
-                self.driver.get(f'{self.base_url}/{target_username}/')
-            self.random_delay()
+        max_retries = 3
+        current_retry = 0
+        
+        while current_retry < max_retries:
+            try:
+                print(f"Getting {connection_type} for {target_username}... (Attempt {current_retry + 1}/{max_retries})")
+                
+                if not self.driver.current_url.endswith(f'/{target_username}/'):
+                    self.driver.get(f'{self.base_url}/{target_username}/')
+                self.random_delay()
 
-            # Click the appropriate link based on connection type
-            connection_link = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, f"//a[contains(@href, '/{connection_type}')]"))
-            )
-            connection_count = connection_link.text
-            print(f"Found {connection_count}")
-            
-            self.check_rate_limit()
-            connection_link.click()
-            self.random_delay()
+                # Check for rate limit popup after navigation
+                if self.handle_rate_limit_popup():
+                    current_retry += 1
+                    continue
 
-            connection_dialog = self.wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog']"))
-            )
-            
-            self.random_delay()
-            usernames = self.scroll_to_load_all(connection_dialog)
+                # Click the appropriate link based on connection type
+                connection_link = self.wait.until(
+                    EC.element_to_be_clickable((By.XPATH, f"//a[contains(@href, '/{connection_type}')]"))
+                )
+                connection_count = connection_link.text
+                print(f"Found {connection_count}")
+                
+                connection_link.click()
+                self.random_delay()
 
-            print(f"Found {len(usernames)} {connection_type}")
-            
-            webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-            self.random_delay()
-            
-            return usernames
+                # Check for rate limit popup after clicking
+                if self.handle_rate_limit_popup():
+                    current_retry += 1
+                    continue
 
-        except Exception as e:
-            print(f"Error getting {connection_type}: {str(e)}")
-            return []
+                connection_dialog = self.wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog']"))
+                )
+                
+                self.random_delay()
+                
+                # Check for rate limit popup before scrolling
+                if self.handle_rate_limit_popup():
+                    current_retry += 1
+                    continue
+                
+                usernames = self.scroll_to_load_all(connection_dialog)
+
+                print(f"Found {len(usernames)} {connection_type}")
+                
+                webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+                self.random_delay()
+                
+                return usernames
+
+            except Exception as e:
+                print(f"Error getting {connection_type} (Attempt {current_retry + 1}): {str(e)}")
+                # Check if it's a rate limit popup
+                if self.handle_rate_limit_popup():
+                    current_retry += 1
+                    continue
+                # If it's another error, increment retry counter
+                current_retry += 1
+                if current_retry < max_retries:
+                    print("Retrying after error...")
+                    self.random_delay(5, 10)  # Longer delay after error
+                
+        print(f"Failed to get {connection_type} after {max_retries} attempts")
+        return []
 
     def process_user(self, target_username: str) -> Tuple[List[str], List[str], bool]:
         """Process a single user and return their followers and following lists"""
@@ -461,12 +508,6 @@ class InstagramScraper:
                         self.setup_driver()
                         self.login()
                         continue
-                
-                # Take a longer break between batches
-                if i + self.batch_size < len(users_list):
-                    break_time = random.uniform(self.batch_break_min, self.batch_break_max)
-                    print(f"\nTaking a break for {break_time/60:.1f} minutes...")
-                    time.sleep(break_time)
             
             print("\nNetwork data collection completed successfully!")
             
@@ -480,4 +521,4 @@ class InstagramScraper:
 
 if __name__ == "__main__":
     scraper = InstagramScraper()
-    scraper.run(False) 
+    scraper.run(True) 
