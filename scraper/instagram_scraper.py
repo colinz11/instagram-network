@@ -111,10 +111,10 @@ class InstagramScraper:
 
     def scroll_to_load_all(self, dialog):
         print("Scrolling to load all items...")
-        SCROLL_PAUSE_TIME = 0.5
         last_height = 0
         retries = 0
         max_retries = 3
+        all_usernames = set()  # Keep track of all usernames found
 
         # First, quickly scroll to the bottom
         print("Fast scrolling to bottom...")
@@ -125,6 +125,10 @@ class InstagramScraper:
         
         while True:
             try:
+                # Extract usernames from current view and update the set
+                new_usernames = self.extract_usernames(dialog)
+                all_usernames.update(new_usernames)
+
                 # Get current scroll height
                 current_height = self.driver.execute_script("return arguments[0].scrollHeight", scrollable)
                 
@@ -143,43 +147,30 @@ class InstagramScraper:
                 last_height = current_height
                 
                 # Quick pause to let content load
-                time.sleep(SCROLL_PAUSE_TIME)
+                time.sleep(0.5)
                 
             except Exception as e:
-                print(f"Error while fast scrolling: {str(e)}")
+                print(f"Error while scrolling: {str(e)}")
                 break
         
-        # Count total items loaded
-        username_elements = dialog.find_elements(
-            By.CSS_SELECTOR,
-            "span.x1lliihq.x193iq5w.x6ikm8r.x10wlt62.xlyipyv.xuxw1ft"
-        )
-        print(f"Total items loaded: {len(username_elements)}")
+        print(f"Total unique usernames found: {len(all_usernames)}")
+        return list(all_usernames)  # Convert set back to list to maintain compatibility
 
     def extract_usernames(self, dialog) -> List[str]:
         try:
-            print("Extracting usernames...")
-            usernames = set()  # Use a set to avoid duplicates
-            
-            # Find all links that could be usernames
+            all_usernames = set()
             links = dialog.find_elements(By.CSS_SELECTOR, "a[role='link']")
-            print(f"Found {len(links)} links")
             for link in links:
                 try:
                     href = link.get_attribute('href')
                     if href and 'instagram.com' in href:
-                        # Extract username from href format "instagram.com/username/"
                         username = href.split('instagram.com/')[-1].strip('/')
                         if self.is_valid_username(username):
-                            usernames.add(username)
-                except Exception as e:
-                    continue  # Skip errors for individual links
-            
-            # Convert set back to list
-            username_list = list(usernames)
-            print(f"Found {len(username_list)} usernames")
-            return username_list
-            
+                            all_usernames.add(username)
+                except:
+                    continue
+            print(f"Found {len(all_usernames)} unique usernames so far...")
+            return list(all_usernames)
         except Exception as e:
             print(f"Error extracting usernames: {str(e)}")
             return []
@@ -242,7 +233,7 @@ class InstagramScraper:
         """Get the follower count for a user"""
         try:
             self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(1)
+            time.sleep(0.5)
             
             # Find the followers count from the meta section
             meta_section = self.wait.until(
@@ -260,7 +251,7 @@ class InstagramScraper:
         """Get the following count for a user"""
         try:
             self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(1)
+            time.sleep(0.5)
             
             # Find the following count from the meta section
             meta_section = self.wait.until(
@@ -293,58 +284,28 @@ class InstagramScraper:
             if follower_count > self.celebrity_threshold:
                 print(f"User {target_username} is a celebrity ({follower_count} followers), saving counts only...")
                 self.celebrity_users.add(target_username)
-                self.user_data[target_username] = {
-                    'followers_count': follower_count,
-                    'following_count': following_count,
-                    'is_celebrity': True,
-                    'followers': [],
-                    'following': []
-                }
-                return [], [], True
+                followers = []
+                following = []
+            else:
+                # Get followers and following for non-celebrity users
+                followers = self.get_followers(target_username)
+                time.sleep(0.5)  # Delay between requests
+                following = self.get_following(target_username)
             
-            # Get followers and following for non-celebrity users
-            followers = self.get_followers(target_username)
-            time.sleep(3)  # Increased delay between requests
+            # Save data for this user
+            self.save_user_data(target_username, set(followers), set(following), follower_count, following_count)
             
-            # Check if we got rate limited or encountered an error
-            if not followers:
-                print("Failed to get followers, marking as celebrity to skip...")
-                self.celebrity_users.add(target_username)
-                self.user_data[target_username] = {
-                    'followers_count': follower_count,
-                    'following_count': following_count,
-                    'is_celebrity': True,
-                    'followers': [],
-                    'following': []
-                }
-                return [], [], True
-            
-            following = self.get_following(target_username)
-            
-            self.user_data[target_username] = {
-                'followers_count': follower_count,
-                'following_count': following_count,
-                'is_celebrity': False,
-                'followers': followers,
-                'following': following
-            }
-            
-            # Save progress after each user
-            self.save_network_data()
-            
-            return followers, following, False
+            return followers, following
             
         except Exception as e:
             print(f"Error processing user {target_username}: {str(e)}")
-            # Save what we have in case of error
-            self.save_network_data()
             return [], [], False
 
     def get_followers(self, target_username: str) -> List[str]:
         try:
             print(f"Getting followers for {target_username}...")
             self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(1)
+            time.sleep(0.5)
 
             followers_link = self.wait.until(
                 EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, '/followers')]"))
@@ -352,20 +313,19 @@ class InstagramScraper:
             followers_count = followers_link.text
             print(f"Found {followers_count}")
             followers_link.click()
-            time.sleep(1)
+            time.sleep(0.5)
 
             followers_dialog = self.wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog']"))
             )
             
-            time.sleep(1)
-            self.scroll_to_load_all(followers_dialog)
+            time.sleep(0.5)
+            follower_usernames = self.scroll_to_load_all(followers_dialog)
 
-            follower_usernames = self.extract_usernames(followers_dialog)
             print(f"Found {len(follower_usernames)} followers")
             
             webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-            time.sleep(1)
+            time.sleep(0.5)
             
             return follower_usernames
 
@@ -377,7 +337,7 @@ class InstagramScraper:
         try:
             print(f"Getting following for {target_username}...")
             self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(1)
+            time.sleep(0.5)
 
             following_link = self.wait.until(
                 EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, '/following')]"))
@@ -385,20 +345,19 @@ class InstagramScraper:
             following_count = following_link.text
             print(f"Found {following_count}")
             following_link.click()
-            time.sleep(1)
+            time.sleep(0.5)
 
             following_dialog = self.wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog']"))
             )
             
-            time.sleep(1)
-            self.scroll_to_load_all(following_dialog)
+            time.sleep(0.5)
+            following_usernames = self.scroll_to_load_all(following_dialog)
 
-            following_usernames = self.extract_usernames(following_dialog)
             print(f"Found {len(following_usernames)} following")
             
             webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-            time.sleep(1)
+            time.sleep(0.5)
             
             return following_usernames
 
@@ -406,50 +365,48 @@ class InstagramScraper:
             print(f"Error getting following: {str(e)}")
             return []
 
-    def save_network_data(self):
-        """Save all collected data to files"""
-        # Create data directory if it doesn't exist
-        os.makedirs('data', exist_ok=True)
+    def save_user_data(self, username: str, followers: set, following: set, followers_count: int, following_count: int):
+        """Save user data to JSON file"""
+        # Convert sets to lists for JSON serialization
+        user_data = {
+            'followers_count': len(followers),
+            'following_count': len(following),
+            'is_celebrity': len(followers) > self.celebrity_threshold,
+            'followers': list(followers),
+            'following': list(following)
+        }
         
-        # Save user data
-        with open('data/user_data.json', 'w') as f:
-            json.dump(self.user_data, f, indent=2)
-        print(f"Saved user data to data/user_data.json")
+        # Load existing data if file exists
+        try:
+            with open('data/user_data.json', 'r') as f:
+                all_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            all_data = {}
         
-        # Create relationships CSV
-        relationships = []
-        for source_user, data in self.user_data.items():
-            # Add follower relationships
-            for follower in data['followers']:
-                relationships.append({
-                    'source': follower,
-                    'target': source_user,
-                    'relationship': 'follower'
-                })
-            # Add following relationships
-            for following in data['following']:
-                relationships.append({
-                    'source': source_user,
-                    'target': following,
-                    'relationship': 'following'
-                })
+        # Update data for current user
+        all_data[username] = user_data
         
-        # Save relationships
-        pd.DataFrame(relationships).to_csv('data/relationships.csv', index=False)
-        print(f"Saved {len(relationships)} relationships to data/relationships.csv")
+        # Save updated data
+        os.makedirs('public', exist_ok=True)
+        with open('public/user_data.json', 'w') as f:
+            json.dump(all_data, f, indent=2)
         
-        # Save celebrity users
-        with open('data/celebrity_users.json', 'w') as f:
-            json.dump(list(self.celebrity_users), f, indent=2)
-        print(f"Saved {len(self.celebrity_users)} celebrity users to data/celebrity_users.json")
+        print(f"Saved data for {username} to user_data.json")
 
-    def run(self):
+    def run(self, skip_main_user: bool = False):
         try:
             self.login()
             
-            # Process main user first
-            main_followers, main_following, _ = self.process_user(self.username)
-            
+            if not skip_main_user:
+                # Process main user first
+                main_followers, main_following = self.process_user(self.username)
+            else:
+                # Read from user_data 
+                with open('public/user_data.json', 'r') as f:
+                    user_data = json.load(f)
+                main_followers = user_data[self.username]['followers']
+                main_following = user_data[self.username]['following']
+                
             # Combine followers and following lists
             users_to_process = set(main_followers + main_following)
             print(f"\nFound {len(users_to_process)} users to process")
@@ -459,7 +416,7 @@ class InstagramScraper:
                 try:
                     print(f"\nProcessing user {i}/{len(users_to_process)}: {username}")
                     self.process_user(username)
-                    time.sleep(3)  # Increased delay between users
+                    time.sleep(1)  # Increased delay between users
                 except Exception as e:
                     print(f"Error processing user {username}: {str(e)}")
                     # Try to recreate the driver if it crashed
@@ -470,15 +427,10 @@ class InstagramScraper:
                     self.setup_driver()
                     self.login()
                     continue
-            
-            # Save all collected data one final time
-            self.save_network_data()
             print("\nNetwork data collection completed successfully!")
             
         except Exception as e:
             print(f"Error during network collection: {str(e)}")
-            # Save what we have in case of error
-            self.save_network_data()
         finally:
             try:
                 self.driver.quit()
@@ -487,4 +439,4 @@ class InstagramScraper:
 
 if __name__ == "__main__":
     scraper = InstagramScraper()
-    scraper.run() 
+    scraper.run(True) 
