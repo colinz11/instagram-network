@@ -421,7 +421,7 @@ class InstagramScraper:
         print(f"Failed to get {connection_type} after {max_retries} attempts")
         return []
 
-    def process_user(self, target_username: str) -> Tuple[List[str], List[str], bool]:
+    def process_user(self, target_username: str, skip_followers: bool = False, skip_following: bool = False) -> Tuple[List[str], List[str], bool]:
         """Process a single user and return their followers and following lists"""
         print(f"\nProcessing user: {target_username}")
         
@@ -440,8 +440,10 @@ class InstagramScraper:
             profile_name = self.get_profile_name(target_username)
             
             # Get follower and following counts
-            follower_count = self.get_connection_count(target_username, 'followers')
-            following_count = self.get_connection_count(target_username, 'following')
+            if not skip_followers:
+                follower_count = self.get_connection_count(target_username, 'followers')
+            if not skip_following:
+                following_count = self.get_connection_count(target_username, 'following')
             
             # Check if user is a celebrity
             if follower_count > self.celebrity_threshold:
@@ -516,7 +518,7 @@ class InstagramScraper:
             for username in users_list:
                 try:
                     print(f"\nProcessing user: {username}")
-                    self.process_user(username)
+                    self.process_user(username, skip_followers=True)
                     self.random_delay()
                 except Exception as e:
                     print(f"Error processing user {username}: {str(e)}")
