@@ -265,6 +265,25 @@ class InstagramScraper:
             print(f"Error getting following count for {target_username}: {str(e)}")
             return 0
 
+    def get_profile_name(self, target_username: str) -> str:
+        """Get the user's display name from their profile."""
+        try:
+            # Wait for the profile header to load
+            header = self.wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "header section"))
+            )
+            
+            # Try to find the name element
+            try:
+                name_element = header.find_element(By.CSS_SELECTOR, "span.x1lliihq")
+                return name_element.text.strip()
+            except:
+                return ""  # Return empty string if name not found
+                
+        except Exception as e:
+            print(f"Error getting profile name for {target_username}: {str(e)}")
+            return ""
+
     def process_user(self, target_username: str) -> Tuple[List[str], List[str], bool]:
         """Process a single user and return their followers and following lists"""
         print(f"\nProcessing user: {target_username}")
@@ -276,6 +295,13 @@ class InstagramScraper:
         self.processed_users.add(target_username)
         
         try:
+            # Navigate to user's profile
+            self.driver.get(f'{self.base_url}/{target_username}/')
+            time.sleep(0.5)
+            
+            # Get profile name
+            profile_name = self.get_profile_name(target_username)
+            
             # Get follower and following counts
             follower_count = self.get_follower_count(target_username)
             following_count = self.get_following_count(target_username)
@@ -293,9 +319,9 @@ class InstagramScraper:
                 following = self.get_following(target_username)
             
             # Save data for this user
-            self.save_user_data(target_username, set(followers), set(following), follower_count, following_count)
+            self.save_user_data(target_username, set(followers), set(following), follower_count, following_count, profile_name)
             
-            return followers, following
+            return followers, following, True
             
         except Exception as e:
             print(f"Error processing user {target_username}: {str(e)}")
@@ -365,15 +391,16 @@ class InstagramScraper:
             print(f"Error getting following: {str(e)}")
             return []
 
-    def save_user_data(self, username: str, followers: set, following: set, followers_count: int, following_count: int):
+    def save_user_data(self, username: str, followers: set, following: set, followers_count: int, following_count: int, profile_name: str = ""):
         """Save user data to JSON file"""
         # Convert sets to lists for JSON serialization
         user_data = {
-            'followers_count': len(followers),
-            'following_count': len(following),
+            'followers_count': followers_count,
+            'following_count': following_count,
             'is_celebrity': len(followers) > self.celebrity_threshold,
             'followers': list(followers),
-            'following': list(following)
+            'following': list(following),
+            'profile_name': profile_name
         }
         
         # Load existing data if file exists

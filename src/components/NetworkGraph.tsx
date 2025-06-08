@@ -7,6 +7,7 @@ interface UserData {
   is_celebrity: boolean;
   followers: string[];
   following: string[];
+  profile_name?: string;
 }
 
 interface NetworkData {
@@ -18,6 +19,7 @@ interface Node {
   followers_count: number;
   following_count: number;
   is_celebrity: boolean;
+  profile_name?: string;
   x?: number;
   y?: number;
   fx?: number | null;
@@ -59,6 +61,7 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({ data }) => {
         followers_count: userData.followers_count,
         following_count: userData.following_count,
         is_celebrity: userData.is_celebrity,
+        profile_name: userData.profile_name
       });
       processedNodes.add(username);
 
@@ -222,16 +225,26 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({ data }) => {
 
       // Add labels to nodes with special styling for main node
       node.append('text')
-        .text(d => d.id)
+        .text(d => {
+          if (d.profile_name) {
+            return d.id === mainUsername ? 
+              `${d.id} (${d.profile_name})` : 
+              d.profile_name;
+          }
+          return d.id;
+        })
         .attr('x', d => nodeSizeScale(d.followers_count) + 5)
         .attr('y', 3)
         .style('font-size', d => d.id === mainUsername ? '12px' : '10px')
         .style('font-weight', d => d.id === mainUsername ? 'bold' : 'normal')
         .style('fill', '#333');
 
-      // Add tooltips
+      // Add tooltips with more detailed information
       node.append('title')
-        .text(d => `${d.id}\nFollowers: ${d.followers_count}\nFollowing: ${d.following_count}`);
+        .text(d => {
+          const name = d.profile_name ? `${d.id} (${d.profile_name})` : d.id;
+          return `${name}\nFollowers: ${d.followers_count}\nFollowing: ${d.following_count}`;
+        });
 
       // Update gradient positions and links on each tick
       simulation.on('tick', () => {
