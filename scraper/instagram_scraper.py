@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -12,6 +13,7 @@ from selenium.webdriver.common.keys import Keys
 from dotenv import load_dotenv
 from typing import Dict, List, Set, Tuple
 import json
+from datetime import datetime, timedelta
 
 class InstagramScraper:
     def __init__(self):
@@ -24,6 +26,17 @@ class InstagramScraper:
         self.processed_users: Set[str] = set()
         self.celebrity_users: Set[str] = set()
         self.user_data: Dict[str, dict] = {}
+        
+        # Rate limiting parameters
+        self.requests_per_hour = 150  # Maximum requests per hour
+        self.min_delay = 2  # Minimum delay between requests in seconds
+        self.max_delay = 4  # Maximum delay between requests in seconds
+        self.batch_size = 25  # Number of users to process before taking a longer break
+        self.batch_break_min = 300  # Minimum break time between batches in seconds (5 minutes)
+        self.batch_break_max = 600  # Maximum break time between batches in seconds (10 minutes)
+        
+        # Request tracking
+        self.request_timestamps = []
 
     def setup_driver(self):
         chrome_options = Options()
@@ -109,52 +122,72 @@ class InstagramScraper:
             print(f"Login failed: {str(e)}")
             raise
 
-    def scroll_to_load_all(self, dialog):
-        print("Scrolling to load all items...")
-        last_height = 0
-        retries = 0
-        max_retries = 3
-        all_usernames = set()  # Keep track of all usernames found
-
-        # First, quickly scroll to the bottom
-        print("Fast scrolling to bottom...")
-        scrollable = dialog.find_element(
-            By.CSS_SELECTOR,
-            ".xyi19xy.x1ccrb07.xtf3nb5.x1pc53ja.x1lliihq.x1iyjqo2.xs83m0k.xz65tgg.x1rife3k.x1n2onr6"
-        )
+    def random_delay(self, min_delay: float = None, max_delay: float = None):
+        """Add a random delay between operations to appear more human-like"""
+        min_d = min_delay if min_delay is not None else self.min_delay
+        max_d = max_delay if max_delay is not None else self.max_delay
+        delay = random.uniform(min_d, max_d)
+        time.sleep(delay)
         
-        while True:
-            try:
-                # Extract usernames from current view and update the set
-                new_usernames = self.extract_usernames(dialog)
-                all_usernames.update(new_usernames)
+    def check_rate_limit(self):
+        """Check if we're approaching rate limits and wait if necessary"""
+        now = datetime.now()
+        hour_ago = now - timedelta(hours=1)
+        
+        # Remove timestamps older than 1 hour
+        self.request_timestamps = [ts for ts in self.request_timestamps if ts > hour_ago]
+        
+        # If we're approaching the limit, wait until we have capacity
+        while len(self.request_timestamps) >= self.requests_per_hour:
+            sleep_time = (self.request_timestamps[0] + timedelta(hours=1) - now).total_seconds()
+            if sleep_time > 0:
+                print(f"Approaching rate limit. Waiting {sleep_time:.0f} seconds...")
+                time.sleep(sleep_time)
+            now = datetime.now()
+            hour_ago = now - timedelta(hours=1)
+            self.request_timestamps = [ts for ts in self.request_timestamps if ts > hour_ago]
+        
+        # Add current request timestamp
+        self.request_timestamps.append(now)
 
-                # Get current scroll height
-                current_height = self.driver.execute_script("return arguments[0].scrollHeight", scrollable)
+    def scroll_to_load_all(self, dialog) -> List[str]:
+        """Scroll through the followers/following dialog and extract all usernames"""
+        try:
+            usernames = set()
+            last_height = 0
+            scroll_attempts = 0
+            max_scroll_attempts = 3  # Stop scrolling if no new content after 3 attempts
+            
+            while scroll_attempts < max_scroll_attempts:
+                # Extract usernames from current view
+                elements = dialog.find_elements(By.CSS_SELECTOR, "a.x1i10hfl")
+                new_usernames = {elem.text for elem in elements if elem.text}
+                usernames.update(new_usernames)
                 
-                if current_height == last_height:
-                    retries += 1
-                    if retries >= max_retries:
-                        print("Reached the bottom")
-                        break
+                # Scroll down
+                dialog.send_keys(Keys.END)
+                self.random_delay(1, 2)  # Shorter delay for scrolling
+                
+                # Check if we've reached the bottom
+                new_height = dialog.get_attribute("scrollHeight")
+                if new_height == last_height:
+                    scroll_attempts += 1
                 else:
-                    retries = 0
+                    scroll_attempts = 0
+                last_height = new_height
                 
-                # Scroll directly to the bottom
-                self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable)
+                # Add some randomness to the scrolling
+                if random.random() < 0.2:  # 20% chance to scroll up a bit
+                    dialog.send_keys(Keys.PAGE_UP)
+                    self.random_delay(0.5, 1)
+                    dialog.send_keys(Keys.PAGE_DOWN)
+                    self.random_delay(0.5, 1)
+            
+            return list(usernames)
                 
-                # Store last height
-                last_height = current_height
-                
-                # Quick pause to let content load
-                time.sleep(0.5)
-                
-            except Exception as e:
-                print(f"Error while scrolling: {str(e)}")
-                break
-        
-        print(f"Total unique usernames found: {len(all_usernames)}")
-        return list(all_usernames)  # Convert set back to list to maintain compatibility
+        except Exception as e:
+            print(f"Error while scrolling: {str(e)}")
+            return list(usernames)  # Return what we've collected so far
 
     def extract_usernames(self, dialog) -> List[str]:
         try:
@@ -229,40 +262,32 @@ class InstagramScraper:
             print(f"Error converting count '{count_text}': {str(e)}")
             return 0
 
-    def get_follower_count(self, target_username: str) -> int:
-        """Get the follower count for a user"""
+    def get_connection_count(self, target_username: str, connection_type: str) -> int:
+        """Get either followers or following count for a user.
+        Args:
+            target_username: The username to get count for
+            connection_type: Either 'followers' or 'following'
+        Returns:
+            Count of connections
+        """
         try:
-            self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(0.5)
-            
-            # Find the followers count from the meta section
-            meta_section = self.wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "ul.x78zum5.x1q0g3np.xieb3on"))
-            )
-            count_items = meta_section.find_elements(By.CSS_SELECTOR, "span.html-span")
-            if len(count_items) >= 2:  # First item is posts, second is followers
-                return self.convert_count_to_number(count_items[1].text)
-            return 0
-        except Exception as e:
-            print(f"Error getting follower count for {target_username}: {str(e)}")
-            return 0
+            # Navigate to profile if not already there
+            if not self.driver.current_url.endswith(f'/{target_username}/'):
+                self.driver.get(f'{self.base_url}/{target_username}/')
+                time.sleep(2)
 
-    def get_following_count(self, target_username: str) -> int:
-        """Get the following count for a user"""
-        try:
-            self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(0.5)
-            
-            # Find the following count from the meta section
-            meta_section = self.wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "ul.x78zum5.x1q0g3np.xieb3on"))
+            # Find the count element
+            count_link = self.wait.until(
+                EC.presence_of_element_located((By.XPATH, f"//a[contains(@href, '/{connection_type}')]"))
             )
-            count_items = meta_section.find_elements(By.CSS_SELECTOR, "span.html-span")
-            if len(count_items) >= 3:  # First is posts, second is followers, third is following
-                return self.convert_count_to_number(count_items[2].text)
-            return 0
+            count_text = count_link.text.strip()
+            
+            # Extract number from text (e.g., "1,234 followers" -> 1234)
+            count = int(''.join(filter(str.isdigit, count_text)))
+            return count
+
         except Exception as e:
-            print(f"Error getting following count for {target_username}: {str(e)}")
+            print(f"Error getting {connection_type} count for {target_username}: {str(e)}")
             return 0
 
     def get_profile_name(self, target_username: str) -> str:
@@ -284,6 +309,45 @@ class InstagramScraper:
             print(f"Error getting profile name for {target_username}: {str(e)}")
             return ""
 
+    def get_user_connections(self, target_username: str, connection_type: str) -> List[str]:
+        """Get either followers or following list for a user."""
+        try:
+            print(f"Getting {connection_type} for {target_username}...")
+            
+            self.check_rate_limit()
+            if not self.driver.current_url.endswith(f'/{target_username}/'):
+                self.driver.get(f'{self.base_url}/{target_username}/')
+            self.random_delay()
+
+            # Click the appropriate link based on connection type
+            connection_link = self.wait.until(
+                EC.element_to_be_clickable((By.XPATH, f"//a[contains(@href, '/{connection_type}')]"))
+            )
+            connection_count = connection_link.text
+            print(f"Found {connection_count}")
+            
+            self.check_rate_limit()
+            connection_link.click()
+            self.random_delay()
+
+            connection_dialog = self.wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog']"))
+            )
+            
+            self.random_delay()
+            usernames = self.scroll_to_load_all(connection_dialog)
+
+            print(f"Found {len(usernames)} {connection_type}")
+            
+            webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            self.random_delay()
+            
+            return usernames
+
+        except Exception as e:
+            print(f"Error getting {connection_type}: {str(e)}")
+            return []
+
     def process_user(self, target_username: str) -> Tuple[List[str], List[str], bool]:
         """Process a single user and return their followers and following lists"""
         print(f"\nProcessing user: {target_username}")
@@ -303,8 +367,8 @@ class InstagramScraper:
             profile_name = self.get_profile_name(target_username)
             
             # Get follower and following counts
-            follower_count = self.get_follower_count(target_username)
-            following_count = self.get_following_count(target_username)
+            follower_count = self.get_connection_count(target_username, 'followers')
+            following_count = self.get_connection_count(target_username, 'following')
             
             # Check if user is a celebrity
             if follower_count > self.celebrity_threshold:
@@ -314,9 +378,8 @@ class InstagramScraper:
                 following = []
             else:
                 # Get followers and following for non-celebrity users
-                followers = self.get_followers(target_username)
-                time.sleep(0.5)  # Delay between requests
-                following = self.get_following(target_username)
+                followers = self.get_user_connections(target_username, 'followers')
+                following = self.get_user_connections(target_username, 'following')
             
             # Save data for this user
             self.save_user_data(target_username, set(followers), set(following), follower_count, following_count, profile_name)
@@ -327,70 +390,6 @@ class InstagramScraper:
             print(f"Error processing user {target_username}: {str(e)}")
             return [], [], False
 
-    def get_followers(self, target_username: str) -> List[str]:
-        try:
-            print(f"Getting followers for {target_username}...")
-            self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(0.5)
-
-            followers_link = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, '/followers')]"))
-            )
-            followers_count = followers_link.text
-            print(f"Found {followers_count}")
-            followers_link.click()
-            time.sleep(0.5)
-
-            followers_dialog = self.wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog']"))
-            )
-            
-            time.sleep(0.5)
-            follower_usernames = self.scroll_to_load_all(followers_dialog)
-
-            print(f"Found {len(follower_usernames)} followers")
-            
-            webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-            time.sleep(0.5)
-            
-            return follower_usernames
-
-        except Exception as e:
-            print(f"Error getting followers: {str(e)}")
-            return []
-
-    def get_following(self, target_username: str) -> List[str]:
-        try:
-            print(f"Getting following for {target_username}...")
-            self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(0.5)
-
-            following_link = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, '/following')]"))
-            )
-            following_count = following_link.text
-            print(f"Found {following_count}")
-            following_link.click()
-            time.sleep(0.5)
-
-            following_dialog = self.wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog']"))
-            )
-            
-            time.sleep(0.5)
-            following_usernames = self.scroll_to_load_all(following_dialog)
-
-            print(f"Found {len(following_usernames)} following")
-            
-            webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-            time.sleep(0.5)
-            
-            return following_usernames
-
-        except Exception as e:
-            print(f"Error getting following: {str(e)}")
-            return []
-
     def save_user_data(self, username: str, followers: set, following: set, followers_count: int, following_count: int, profile_name: str = ""):
         """Save user data to JSON file"""
         # Convert sets to lists for JSON serialization
@@ -400,12 +399,13 @@ class InstagramScraper:
             'is_celebrity': len(followers) > self.celebrity_threshold,
             'followers': list(followers),
             'following': list(following),
-            'profile_name': profile_name
+            'profile_name': profile_name,
+            'last_updated': time.strftime('%Y-%m-%d %H:%M:%S')
         }
         
         # Load existing data if file exists
         try:
-            with open('data/user_data.json', 'r') as f:
+            with open('public/user_data.json', 'r') as f:
                 all_data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             all_data = {}
@@ -418,7 +418,7 @@ class InstagramScraper:
         with open('public/user_data.json', 'w') as f:
             json.dump(all_data, f, indent=2)
         
-        print(f"Saved data for {username} to user_data.json")
+        print(f"Updated data for {username} in user_data.json")
 
     def run(self, skip_main_user: bool = False):
         try:
@@ -426,7 +426,7 @@ class InstagramScraper:
             
             if not skip_main_user:
                 # Process main user first
-                main_followers, main_following = self.process_user(self.username)
+                main_followers, main_following, _ = self.process_user(self.username)
             else:
                 # Read from user_data 
                 with open('public/user_data.json', 'r') as f:
@@ -438,22 +438,36 @@ class InstagramScraper:
             users_to_process = set(main_followers + main_following)
             print(f"\nFound {len(users_to_process)} users to process")
             
-            # Process each user's network
-            for i, username in enumerate(users_to_process, 1):
-                try:
-                    print(f"\nProcessing user {i}/{len(users_to_process)}: {username}")
-                    self.process_user(username)
-                    time.sleep(1)  # Increased delay between users
-                except Exception as e:
-                    print(f"Error processing user {username}: {str(e)}")
-                    # Try to recreate the driver if it crashed
+            # Process users in batches
+            users_list = list(users_to_process)
+            for i in range(0, len(users_list), self.batch_size):
+                batch = users_list[i:i + self.batch_size]
+                print(f"\nProcessing batch {i//self.batch_size + 1}/{(len(users_list) + self.batch_size - 1)//self.batch_size}")
+                
+                for j, username in enumerate(batch, 1):
                     try:
-                        self.driver.quit()
-                    except:
-                        pass
-                    self.setup_driver()
-                    self.login()
-                    continue
+                        print(f"\nProcessing user {j}/{len(batch)} in current batch: {username}")
+                        self.process_user(username)
+                        # Random delay between users
+                        if j < len(batch):
+                            self.random_delay()
+                    except Exception as e:
+                        print(f"Error processing user {username}: {str(e)}")
+                        # Try to recreate the driver if it crashed
+                        try:
+                            self.driver.quit()
+                        except:
+                            pass
+                        self.setup_driver()
+                        self.login()
+                        continue
+                
+                # Take a longer break between batches
+                if i + self.batch_size < len(users_list):
+                    break_time = random.uniform(self.batch_break_min, self.batch_break_max)
+                    print(f"\nTaking a break for {break_time/60:.1f} minutes...")
+                    time.sleep(break_time)
+            
             print("\nNetwork data collection completed successfully!")
             
         except Exception as e:
@@ -466,4 +480,4 @@ class InstagramScraper:
 
 if __name__ == "__main__":
     scraper = InstagramScraper()
-    scraper.run(True) 
+    scraper.run(False) 
