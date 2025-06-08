@@ -216,11 +216,33 @@ class InstagramScraper:
             
         return True
 
+    def convert_count_to_number(self, count_text: str) -> int:
+        """Convert Instagram count format (e.g., '61.2k', '1.2M') to number"""
+        try:
+            # Remove commas and convert to lowercase
+            count_text = count_text.replace(',', '').lower().strip()
+            
+            # Handle 'k' thousands
+            if 'k' in count_text:
+                number = float(count_text.replace('k', ''))
+                return int(number * 1000)
+            
+            # Handle 'M' millions
+            if 'm' in count_text:
+                number = float(count_text.replace('m', ''))
+                return int(number * 1000000)
+            
+            # Handle regular numbers
+            return int(count_text.split()[0])
+        except Exception as e:
+            print(f"Error converting count '{count_text}': {str(e)}")
+            return 0
+
     def get_follower_count(self, target_username: str) -> int:
         """Get the follower count for a user"""
         try:
             self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(2)
+            time.sleep(1)
             
             # Find the followers count from the meta section
             meta_section = self.wait.until(
@@ -228,8 +250,7 @@ class InstagramScraper:
             )
             count_items = meta_section.find_elements(By.CSS_SELECTOR, "span.html-span")
             if len(count_items) >= 2:  # First item is posts, second is followers
-                count_text = count_items[1].text.replace(',', '').split()[0]
-                return int(count_text) if count_text.isdigit() else 0
+                return self.convert_count_to_number(count_items[1].text)
             return 0
         except Exception as e:
             print(f"Error getting follower count for {target_username}: {str(e)}")
@@ -239,7 +260,7 @@ class InstagramScraper:
         """Get the following count for a user"""
         try:
             self.driver.get(f'{self.base_url}/{target_username}/')
-            time.sleep(2)
+            time.sleep(1)
             
             # Find the following count from the meta section
             meta_section = self.wait.until(
@@ -247,8 +268,7 @@ class InstagramScraper:
             )
             count_items = meta_section.find_elements(By.CSS_SELECTOR, "span.html-span")
             if len(count_items) >= 3:  # First is posts, second is followers, third is following
-                count_text = count_items[2].text.replace(',', '').split()[0]
-                return int(count_text) if count_text.isdigit() else 0
+                return self.convert_count_to_number(count_items[2].text)
             return 0
         except Exception as e:
             print(f"Error getting following count for {target_username}: {str(e)}")
